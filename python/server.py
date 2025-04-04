@@ -8,13 +8,54 @@ import struct
 import os
 import datetime
 import argparse
+from common import MSession
 from collections import defaultdict
 
-def get_timestamp_filename(name):
-    current_time = datetime.datetime.now()
-    formatted_time = current_time.strftime("%Y%m%d%H%M%S")
-    filename = f"{formatted_time}_{name}.json"
-    return filename
+class PacketManager:
+    def __init__(self, packet_info):
+        self.packet_info = packet_info
+        # Cleanup every 60 seconds
+        self.cleanup_interval = 60
+        self.running = True
+        # This will act as our hashmap
+        self.data = {}
+
+        threading.Thread(target=self.cleanup_sessions, daemon=True).start()
+
+    # Add a new MSession object for the given key
+    def add(self, key):
+        if key not in self.data:
+            self.data[key] = MSession()
+
+    # Count a packet for the given key and number
+    def count_packet(self, key, number):
+        if key in self.data:
+            return self.data[key].count_packet(number)
+        else:
+            # If the key doesn't exist, create a new session and count the
+            # packet
+            self.add(key)
+            return self.data[key].count_packet(number)
+
+    # Periodically clean up old sessions
+    def cleanup_sessions(self):
+        while self.running:
+            current_time = time.time()
+            keys_to_delete = []
+            for key, session in self.data.items():
+                if current_time - session.timestamp > 60:  # 60 seconds
+                    keys_to_delete.append(key)
+            for key in keys_to_delete:
+                del self.data[key]
+                # mark the packet info element as dying...
+                self.packet_info[key]['dying'] = True
+
+            # Wait for the specified interval before checking again
+            time.sleep(self.cleanup_interval)
+
+    # Stop the background cleanup thread
+    def stop(self):
+        self.running = False
 
 # Define the UDP server
 class UDPServer:
@@ -25,13 +66,16 @@ class UDPServer:
         # endpoint (e.g., the connecting client).
         self.packet_info = defaultdict(lambda: {
             'count': 0,
+            'duplicates': 0,
             'first_seen': None,
             'last_seen': None,
             'packet_rate': 0,
             'total_packets': 0,
             'direction': 0,
+            'dying': False,
             'remote': None,
         })
+        self.packet_manager = PacketManager(self.packet_info)
         self.server_address = (host, port)
         self.send_running = False
         self.running = True
@@ -53,11 +97,12 @@ class UDPServer:
         rcv_thread = threading.Thread(target=self.receive_packets, daemon=True)
         rcv_thread.start()
 
-    def send_packet(self, remote_address, packet_id, packet_rate,
+    def send_packet(self, remote_address, packet_id, packet_num, packet_rate,
                     total_packets, direction):
             # Create the packet data
-            packet_data = struct.pack('!IIII', packet_id, packet_rate,
-                                      total_packets, direction) + b'\x00' * (64 - 16)
+            packet_data = struct.pack('!IIIII', packet_id, packet_num,
+                                      packet_rate, total_packets,
+                                      direction) + b'\x00' * (64 - 20)
             self.sock.sendto(packet_data, remote_address)
 
     # Control the sending rate
@@ -81,10 +126,11 @@ class UDPServer:
         direction = self.packet_info[packet_id]['direction']
 
         for i in range(total_packets):
+            packet_num = i
             # Update the packet information
             self.packet_info[packet_id]['count'] += 1
 
-            self.send_packet(remote_address, packet_id, packet_rate,
+            self.send_packet(remote_address, packet_id, packet_num, packet_rate,
                              total_packets, direction)
 
             self.send_rate_sleep(packet_rate)
@@ -94,13 +140,18 @@ class UDPServer:
             data, addr = self.sock.recvfrom(1024)  # Buffer size is 1024 bytes
             if len(data) >= 64:
                 packet_id = int.from_bytes(data[:4], byteorder='big')
-                packet_rate = int.from_bytes(data[4:8], byteorder='big')
-                total_packets = int.from_bytes(data[8:12], byteorder='big')
-                direction = int.from_bytes(data[12:16], byteorder='big')
+                if self.packet_info[packet_id]['dying']:
+                    # this measurement test has expired, ignore it
+                    continue
+
+                packet_number = int.from_bytes(data[4:8], byteorder='big')
+                packet_rate = int.from_bytes(data[8:12], byteorder='big')
+                total_packets = int.from_bytes(data[12:16], byteorder='big')
+                direction = int.from_bytes(data[16:20], byteorder='big')
+
                 current_time = time.time()
 
                 self.packet_info[packet_id]['remote'] = addr
-
                 self.packet_info[packet_id]['total_packets'] = total_packets
                 self.packet_info[packet_id]['packet_rate'] = packet_rate
                 self.packet_info[packet_id]['direction'] = direction
@@ -115,8 +166,12 @@ class UDPServer:
 
                 self.packet_info[packet_id]['last_seen'] = current_time
 
-                # Update the packet information
-                self.packet_info[packet_id]['count'] += 1
+                packet_number_cnt = self.packet_manager.count_packet(packet_id, packet_number);
+                if packet_number_cnt == 1:
+                    # no duplicates
+                    self.packet_info[packet_id]['count'] += 1
+                else:
+                    self.packet_info[packet_id]['duplicates'] += 1
 
     def save_to_json(self):
         packet_info_copy = self.packet_info.copy()
@@ -134,6 +189,7 @@ class UDPServer:
     def stop(self):
         self.running = False
         self.sock.close()
+        self.packet_manager.stop()
         # save on disk
         self.save_to_json()
 

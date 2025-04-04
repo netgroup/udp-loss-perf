@@ -11,13 +11,8 @@ import sys
 import traceback
 import argparse
 import datetime
+from common import MSession
 from collections import defaultdict
-
-def get_timestamp_filename(name):
-    current_time = datetime.datetime.now()
-    formatted_time = current_time.strftime("%Y%m%d%H%M%S")
-    filename = f"{formatted_time}_{name}.json"
-    return filename
 
 class SenderDownloadError(Exception):
     """Exception raised for errors in the sender download process."""
@@ -26,12 +21,13 @@ class SenderDownloadError(Exception):
 # Define the UDP client
 class UDPClient:
     def __init__(self, host, port=12345, packets_to_send=600,
-                 rate=100, direction=0, id_file='used_ids.txt',
+                 rate=100, direction=0, id_file='data/used_ids.txt',
                  output_file=None):
         # Each packet ID will map to a dictionary with count, first_seen,
         # last_seen, packet_rate, total_packets, direction
         self.packet_info = defaultdict(lambda: {
             'count': 0,
+            'duplicates': 0,
             'first_seen': None,
             'last_seen': None,
             'packet_rate': 0,
@@ -43,6 +39,7 @@ class UDPClient:
         self.local_address = ('', port)
         self.receive_running = False
         self.direction = direction
+        self.msession = MSession()
         self.id_file = id_file
         self.running = True
         self.rate = rate
@@ -74,11 +71,12 @@ class UDPClient:
                 self.save_used_id(packet_id)   # Save the ID to the file
                 return packet_id
 
-    def send_packet(self, packet_id, packet_rate, total_packets, direction):
+    def send_packet(self, packet_id, packet_num, packet_rate, total_packets,
+                    direction):
             # Create the packet data
-            packet_data = struct.pack('!IIII', packet_id, packet_rate,
-                                      total_packets,
-                                      direction) + b'\x00' * (64 - 16)
+            packet_data = struct.pack('!IIIII', packet_id, packet_num,
+                                      packet_rate, total_packets,
+                                      direction) + b'\x00' * (64 - 20)
             self.sock.sendto(packet_data, self.server_address)
 
     # Control the sending rate
@@ -100,7 +98,9 @@ class UDPClient:
         # This is a total of 16 bytes, leaving 48 bytes for padding to reach at
         # least 64 bytes
         for i in range(self.packets_to_send):
-            self.send_packet(packet_id, packet_rate, total_packets, direction)
+            packet_num = i
+            self.send_packet(packet_id, packet_num, packet_rate, total_packets,
+                             direction)
 
             self.send_rate_sleep()
 
@@ -110,6 +110,9 @@ class UDPClient:
         total_packets = self.packets_to_send
         direction = self.direction
         packet_id = self.packet_id
+        # placeholder, while performing a request we do not really need of the
+        # packet number.
+        packet_num = (2**32) - 1
         packet_rate = self.rate
         retry = 0
 
@@ -120,7 +123,8 @@ class UDPClient:
                 # Client started to receive DOWNLOAD traffic from the server
                 break
 
-            self.send_packet(packet_id, packet_rate, total_packets, direction)
+            self.send_packet(packet_id, packet_num, packet_rate, total_packets,
+                             direction)
 
             self.send_rate_sleep()
             retry += 1
@@ -145,13 +149,14 @@ class UDPClient:
             data, addr = self.sock.recvfrom(1024)  # Buffer size is 1024 bytes
             if len(data) >= 64:
                 packet_id = int.from_bytes(data[:4], byteorder='big')
-                packet_rate = int.from_bytes(data[4:8], byteorder='big')
-                total_packets = int.from_bytes(data[8:12], byteorder='big')
-                direction = int.from_bytes(data[12:16], byteorder='big')
+                # TODO: DO THE SAME AS THE SERVER
+                packet_number = int.from_bytes(data[4:8], byteorder='big')
+                packet_rate = int.from_bytes(data[8:12], byteorder='big')
+                total_packets = int.from_bytes(data[12:16], byteorder='big')
+                direction = int.from_bytes(data[16:20], byteorder='big')
                 current_time = time.time()
 
                 # Update the packet information
-                self.packet_info[packet_id]['count'] += 1
                 self.packet_info[packet_id]['total_packets'] = total_packets
                 self.packet_info[packet_id]['packet_rate'] = packet_rate
                 self.packet_info[packet_id]['direction'] = direction
@@ -161,11 +166,20 @@ class UDPClient:
 
                 self.packet_info[packet_id]['last_seen'] = current_time
 
+                packet_number_cnt = self.msession.count_packet(packet_number)
+                if packet_number_cnt == 1:
+                    # no duplicates
+                    self.packet_info[packet_id]['count'] += 1
+                else:
+                    self.packet_info[packet_id]['duplicates'] += 1
+
                 # To exit from this loop we have different conditions
 
                 count = self.packet_info[packet_id]['count']
                 if count == total_packets:
-                    # exit when we received all the packets w/o waiting
+                    # exit when we received all the packets w/o waiting.
+                    # NOTE: we don't care of duplicates packet when all packets
+                    # have been received.
                     return
 
                 duration = total_packets/packet_rate
@@ -175,7 +189,7 @@ class UDPClient:
                     continue
 
                 timeout = duration
-                self.sock.settimeout(2 * timeout)
+                self.sock.settimeout(timeout)
 
     def receive_packets(self):
         try:
@@ -184,8 +198,11 @@ class UDPClient:
             # not all packets have been received, so a timeout on the socket
             # is triggered.
             pass
-        except Exception:
+        except Exception as e:
             # other exceptions are fatal?! NO MERCY!
+            tb_exception = traceback.TracebackException.from_exception(e)
+            print("An exception occurred:")
+            print(''.join(tb_exception.format()))
             os._exit(1)
 
     def start_download(self):
