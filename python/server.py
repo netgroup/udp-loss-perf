@@ -7,15 +7,16 @@ import json
 import struct
 import os
 import datetime
+import traceback
 import argparse
 import common
 from collections import defaultdict
 
 class PacketManager:
-    def __init__(self, packet_info):
+    def __init__(self, packet_info, session_timeout=60, gc_timeout=30):
+        self.session_timeout = session_timeout
+        self.cleanup_interval = gc_timeout
         self.packet_info = packet_info
-        # Cleanup every 60 seconds
-        self.cleanup_interval = 60
         self.running = True
         # This will act as our hashmap
         self.data = {}
@@ -38,13 +39,14 @@ class PacketManager:
             return self.data[key].count_packet(number)
 
     # Periodically clean up old sessions
-    def cleanup_sessions(self):
+    def cleanup_sessions_core(self):
         while self.running:
             current_time = time.time()
             keys_to_delete = []
             for key, session in self.data.items():
-                if current_time - session.timestamp > 60:  # 60 seconds
+                if current_time - session.timestamp > self.session_timeout:
                     keys_to_delete.append(key)
+
             for key in keys_to_delete:
                 del self.data[key]
                 # mark the packet info element as dying...
@@ -52,6 +54,16 @@ class PacketManager:
 
             # Wait for the specified interval before checking again
             time.sleep(self.cleanup_interval)
+
+    def cleanup_sessions(self):
+        try:
+            self.cleanup_sessions_core()
+        except Exception as e:
+            # other exceptions are fatal?! NO MERCY!
+            tb_exception = traceback.TracebackException.from_exception(e)
+            print("An exception occurred:")
+            print(''.join(tb_exception.format()))
+            os._exit(1)
 
     # Stop the background cleanup thread
     def stop(self):
@@ -77,6 +89,7 @@ class UDPServer:
         })
         self.packet_manager = PacketManager(self.packet_info)
         self.server_address = (host, port)
+        self.lock = threading.Lock()
         self.send_running = False
         self.running = True
         self.port = port
@@ -110,16 +123,12 @@ class UDPServer:
     def send_rate_sleep(self, packet_rate):
         time.sleep(1 / packet_rate)
 
-    def send_packets(self, packet_id):
+    def send_packets_core(self, packet_id):
         current_time = time.time()
 
-        if self.packet_info[packet_id]['first_seen'] is not None:
-            # duplicated request packet for download
+        with self.lock:
+            self.packet_info[packet_id]['first_seen'] = current_time
             self.packet_info[packet_id]['last_seen'] = current_time
-            return
-
-        self.packet_info[packet_id]['first_seen'] = current_time
-        self.packet_info[packet_id]['last_seen'] = current_time
 
         remote_address = self.packet_info[packet_id]['remote']
         packet_rate = self.packet_info[packet_id]['packet_rate']
@@ -134,7 +143,38 @@ class UDPServer:
             self.send_packet(remote_address, packet_id, packet_num, packet_rate,
                              total_packets, direction)
 
-            self.send_rate_sleep(packet_rate)
+            common.send_rate_sleep(packet_rate)
+
+    def send_packets_non_blocking(self, packet_id):
+        current_time = time.time()
+
+        with self.lock:
+            if self.packet_info[packet_id]['first_seen'] is not None:
+                # duplicated request packet for download. Send operation
+                # already started.
+                self.packet_info[packet_id]['last_seen'] = current_time
+                # NOTE: lock is automatically released
+                return
+
+        rcv_thread = threading.Thread(target=self.send_packets_core,
+                                      args=(packet_id,), daemon=True)
+        rcv_thread.start()
+
+    def receive_packet_finish(self, packet_id, packet_number):
+        current_time = time.time()
+
+        if self.packet_info[packet_id]['first_seen'] is None:
+             self.packet_info[packet_id]['first_seen'] = current_time
+
+        self.packet_info[packet_id]['last_seen'] = current_time
+
+        packet_number_cnt = self.packet_manager.count_packet(packet_id,
+                                                             packet_number);
+        if packet_number_cnt == 1:
+            # no duplicates
+            self.packet_info[packet_id]['count'] += 1
+        else:
+            self.packet_info[packet_id]['duplicates'] += 1
 
     def receive_packets(self):
         while self.running:
@@ -145,12 +185,9 @@ class UDPServer:
                     # this measurement test has expired, ignore it
                     continue
 
-                packet_number = int.from_bytes(data[4:8], byteorder='big')
                 packet_rate = int.from_bytes(data[8:12], byteorder='big')
                 total_packets = int.from_bytes(data[12:16], byteorder='big')
                 direction = int.from_bytes(data[16:20], byteorder='big')
-
-                current_time = time.time()
 
                 self.packet_info[packet_id]['remote'] = addr
                 self.packet_info[packet_id]['total_packets'] = total_packets
@@ -159,20 +196,15 @@ class UDPServer:
 
                 if direction > 0:
                     # the client is in download mode
-                    self.send_packets(packet_id)
+                    self.send_packets_non_blocking(packet_id)
                     continue
 
-                if self.packet_info[packet_id]['first_seen'] is None:
-                    self.packet_info[packet_id]['first_seen'] = current_time
+                # the client is in upload mode, a.k.a. the server is receiving
+                # traffic from the client.
 
-                self.packet_info[packet_id]['last_seen'] = current_time
+                packet_number = int.from_bytes(data[4:8], byteorder='big')
 
-                packet_number_cnt = self.packet_manager.count_packet(packet_id, packet_number);
-                if packet_number_cnt == 1:
-                    # no duplicates
-                    self.packet_info[packet_id]['count'] += 1
-                else:
-                    self.packet_info[packet_id]['duplicates'] += 1
+                self.receive_packet_finish(packet_id, packet_number)
 
     def save_to_json(self):
         packet_info_copy = self.packet_info.copy()

@@ -12,6 +12,10 @@ def get_timestamp_filename(name):
 
     return filename
 
+# Control the sending rate
+def send_rate_sleep(packet_rate):
+    time.sleep(1 / packet_rate)
+
 class MSession:
     def __init__(self):
         # This dictionary will act as the hashtable to track seen numbers

@@ -45,6 +45,8 @@ class UDPClient:
         self.rate = rate
 
         self.used_ids = self.load_used_ids()
+        # Every time the program is started, a new ID is generated
+        self.packet_id = self.generate_unique_id()
 
         self.output_file = (common.get_timestamp_filename("client")
                             if output_file is None else output_file)
@@ -80,12 +82,6 @@ class UDPClient:
                                       direction) + b'\x00' * (64 - 20)
             self.sock.sendto(packet_data, self.server_address)
 
-    # Control the sending rate
-    def send_rate_sleep(self):
-        packet_rate = self.rate
-
-        time.sleep(1 / packet_rate)
-
     def send_packets(self):
         # Prepare the packet header with the packet rate and total number of
         # packets
@@ -103,7 +99,7 @@ class UDPClient:
             self.send_packet(packet_id, packet_num, packet_rate, total_packets,
                              direction)
 
-            self.send_rate_sleep()
+            common.send_rate_sleep(packet_rate)
 
         self.sock.close()
 
@@ -127,7 +123,7 @@ class UDPClient:
             self.send_packet(packet_id, packet_num, packet_rate, total_packets,
                              direction)
 
-            self.send_rate_sleep()
+            common.send_rate_sleep(packet_rate)
             retry += 1
 
         if retry != total_packets:
@@ -150,7 +146,12 @@ class UDPClient:
             data, addr = self.sock.recvfrom(1024)  # Buffer size is 1024 bytes
             if len(data) >= 64:
                 packet_id = int.from_bytes(data[:4], byteorder='big')
-                # TODO: DO THE SAME AS THE SERVER
+                if packet_id != self.packet_id:
+                    # server is still transmitting in a already started
+                    # session. ignore packets as they are not intended to be
+                    # for us.
+                    continue
+
                 packet_number = int.from_bytes(data[4:8], byteorder='big')
                 packet_rate = int.from_bytes(data[8:12], byteorder='big')
                 total_packets = int.from_bytes(data[12:16], byteorder='big')
@@ -179,7 +180,7 @@ class UDPClient:
                 count = self.packet_info[packet_id]['count']
                 if count == total_packets:
                     # exit when we received all the packets w/o waiting.
-                    # NOTE: we don't care of duplicates packet when all packets
+                    # NOTE: we don't care of duplicate packets when all packets
                     # have been received.
                     return
 
@@ -233,10 +234,7 @@ class UDPClient:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(self.local_address)
 
-        # Every time the program is started, a new ID is generated
-        self.packet_id = self.generate_unique_id()
         direction = self.direction
-
         if direction == 0:
             # upload mode (this client sends traffic to the sever)
             self.send_packets()
