@@ -8,7 +8,7 @@ import struct
 import os
 import datetime
 import argparse
-from common import MSession
+import common
 from collections import defaultdict
 
 class PacketManager:
@@ -25,7 +25,7 @@ class PacketManager:
     # Add a new MSession object for the given key
     def add(self, key):
         if key not in self.data:
-            self.data[key] = MSession()
+            self.data[key] = common.MSession()
 
     # Count a packet for the given key and number
     def count_packet(self, key, number):
@@ -81,7 +81,8 @@ class UDPServer:
         self.running = True
         self.port = port
 
-        self.output_file = get_timestamp_filename("server") if output_file is None else output_file
+        self.output_file = (common.get_timestamp_filename("server")
+                            if output_file is None else output_file)
 
     def start(self):
         # Create a UDP socket

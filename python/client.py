@@ -11,7 +11,7 @@ import sys
 import traceback
 import argparse
 import datetime
-from common import MSession
+import common
 from collections import defaultdict
 
 class SenderDownloadError(Exception):
@@ -36,17 +36,18 @@ class UDPClient:
         })
         self.packets_to_send = packets_to_send
         self.server_address = (host, port)
+        self.msession = common.MSession()
         self.local_address = ('', port)
         self.receive_running = False
         self.direction = direction
-        self.msession = MSession()
         self.id_file = id_file
         self.running = True
         self.rate = rate
 
         self.used_ids = self.load_used_ids()
 
-        self.output_file = get_timestamp_filename("client") if output_file is None else output_file
+        self.output_file = (common.get_timestamp_filename("client")
+                            if output_file is None else output_file)
 
     # Load used packet IDs from a file
     def load_used_ids(self):
