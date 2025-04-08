@@ -27,7 +27,7 @@ class TransmissionState(Enum):
 # Define the UDP client
 class UDPClient:
     def __init__(self, host, port=12345, packets_to_send=600,
-                 rate=100, direction=0, id_file='data/used_ids.txt',
+                 rate=100, direction=0, id_file='/root/data/used_ids.txt',
                  interface=None, output_file=None):
         # Each packet ID will map to a dictionary with count, first_seen,
         # last_seen, packet_rate, total_packets, direction
