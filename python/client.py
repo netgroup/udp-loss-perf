@@ -12,11 +12,16 @@ import traceback
 import argparse
 import datetime
 import common
+from enum import Enum
 from collections import defaultdict
 
 class SenderDownloadError(Exception):
     """Exception raised for errors in the sender download process."""
     pass
+
+class TransmissionState(Enum):
+    START_TX    = 1
+    SEND_DATA   = 2
 
 # Define the UDP client
 class UDPClient:
@@ -37,7 +42,6 @@ class UDPClient:
         self.packets_to_send = packets_to_send
         self.server_address = (host, port)
         self.msession = common.MSession()
-        self.local_address = ('', port)
         self.receive_running = False
         self.direction = direction
         self.id_file = id_file
@@ -82,25 +86,38 @@ class UDPClient:
                                       direction) + b'\x00' * (64 - 20)
             self.sock.sendto(packet_data, self.server_address)
 
-    def send_packets(self):
+    def __send_packets(self, op, tx_packets_to_send):
         # Prepare the packet header with the packet rate and total number of
         # packets
-        packet_id = self.packet_id
-        packet_rate = self.rate
         total_packets = self.packets_to_send
+        packet_id = self.packet_id
         direction = self.direction
+        packet_rate = self.rate
 
         # Create a packet format: 4 bytes for packet ID, 4 bytes for packet
         # rate, 4 bytes for total packets, 4 byte for direction.
         # This is a total of 16 bytes, leaving 48 bytes for padding to reach at
         # least 64 bytes
-        for i in range(self.packets_to_send):
-            packet_num = i
+        for i in range(tx_packets_to_send):
+            # we start a transmission, so we send packets with a specific
+            # packet_number to notify the receiver that it needs to prepare for
+            # receiving incoming packets.
+            if op == TransmissionState.START_TX:
+                packet_num = (2**32) - 1
+            else:
+                packet_num = i
+
             self.send_packet(packet_id, packet_num, packet_rate, total_packets,
                              direction)
 
             common.send_rate_sleep(packet_rate)
 
+    def send_packets(self):
+        # notify the remote endpoint a tx is starting
+        self.__send_packets(TransmissionState.START_TX, 100)
+
+        # start transmitting the real data
+        self.__send_packets(TransmissionState.SEND_DATA, self.packets_to_send)
         self.sock.close()
 
     def send_download_request(self):
@@ -232,7 +249,6 @@ class UDPClient:
 
     def start(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(self.local_address)
 
         direction = self.direction
         if direction == 0:

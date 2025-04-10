@@ -12,6 +12,9 @@ def get_timestamp_filename(name):
 
     return filename
 
+def get_pcap_fullpath(pcap_name):
+    return f"data/{pcap_name}"
+
 # Control the sending rate
 def send_rate_sleep(packet_rate):
     time.sleep(1 / packet_rate)
@@ -26,12 +29,17 @@ class MSession:
     def count_packet(self, number):
         # Update the timestamp every time count_packet is called
         self.timestamp = time.time()
+        start_tx_num = (2 ** 32) - 1
+
+        if number == start_tx_num:
+            # this is a packet required for starting a communication
+            return start_tx_num
 
         if number in self.seen_numbers:
             self.seen_numbers[number] += 1
             # Return the count of how many times it has been seen
             return self.seen_numbers[number]
-        else:
-            # Return 1 since this is the first time it's seen
-            self.seen_numbers[number] = 1
-            return 1
+
+        # Return 1 since this is the first time it's seen
+        self.seen_numbers[number] = 1
+        return 1
