@@ -10,10 +10,14 @@ import datetime
 import traceback
 import argparse
 import common
+import subprocess
+import signal
 from collections import defaultdict
 
 class PacketManager:
-    def __init__(self, packet_info, session_timeout=60, gc_timeout=30):
+    def __init__(self, packet_info, tcpdump_processes, session_timeout=60,
+                 gc_timeout=30):
+        self.tcpdump_processes = tcpdump_processes
         self.session_timeout = session_timeout
         self.cleanup_interval = gc_timeout
         self.packet_info = packet_info
@@ -52,7 +56,18 @@ class PacketManager:
                 # mark the packet info element as dying...
                 self.packet_info[key]['dying'] = True
 
-            # Wait for the specified interval before checking again
+                # Stop tcpdump if session is dying
+                if key in self.tcpdump_processes:
+                    tcpdump_pid = self.tcpdump_processes[key]
+                    try:
+                        os.kill(tcpdump_pid, signal.SIGTERM)
+                        # This will clean up the zombie process
+                        os.waitpid(tcpdump_pid, 0)
+                    except OSError:
+                        pass  # Process may have already terminated
+
+                    del self.tcpdump_processes[key]
+
             time.sleep(self.cleanup_interval)
 
     def cleanup_sessions(self):
@@ -71,7 +86,7 @@ class PacketManager:
 
 # Define the UDP server
 class UDPServer:
-    def __init__(self, host='0.0.0.0', port=12345,
+    def __init__(self, host='0.0.0.0', port=12345, tcpdump_interface=None,
                  output_file=None):
         # Each packet ID will map to a dictionary with count, first_seen,
         # last_seen, packet_rate, total_packets, direction and the remote
@@ -87,7 +102,10 @@ class UDPServer:
             'dying': False,
             'remote': None,
         })
-        self.packet_manager = PacketManager(self.packet_info)
+        self.tcpdump_processes = {}  # structure to hold tcpdump PIDs
+        self.packet_manager = PacketManager(self.packet_info,
+                                            self.tcpdump_processes)
+        self.tcpdump_interface = tcpdump_interface
         self.server_address = (host, port)
         self.lock = threading.Lock()
         self.send_running = False
@@ -113,11 +131,10 @@ class UDPServer:
 
     def send_packet(self, remote_address, packet_id, packet_num, packet_rate,
                     total_packets, direction):
-            # Create the packet data
-            packet_data = struct.pack('!IIIII', packet_id, packet_num,
-                                      packet_rate, total_packets,
-                                      direction) + b'\x00' * (64 - 20)
-            self.sock.sendto(packet_data, remote_address)
+        packet_data = struct.pack('!IIIII', packet_id, packet_num,
+                                  packet_rate, total_packets,
+                                  direction) + b'\x00' * (64 - 20)
+        self.sock.sendto(packet_data, remote_address)
 
     # Control the sending rate
     def send_rate_sleep(self, packet_rate):
@@ -137,7 +154,6 @@ class UDPServer:
 
         for i in range(total_packets):
             packet_num = i
-            # Update the packet information
             self.packet_info[packet_id]['count'] += 1
 
             self.send_packet(remote_address, packet_id, packet_num, packet_rate,
@@ -160,16 +176,54 @@ class UDPServer:
                                       args=(packet_id,), daemon=True)
         rcv_thread.start()
 
+    def start_tcpdump(self, packet_id):
+        # Only start if interface is provided
+        if self.tcpdump_interface:
+            srchost, srcport = self.packet_info[packet_id]['remote']
+
+            pcap_name = f"tcpdump_up_{packet_id}.pcap"
+            pcap_fullname = common.get_pcap_fullpath(pcap_name)
+
+            command = ['tcpdump', '-i', self.tcpdump_interface,
+                        f'udp and src host {srchost} and src port {srcport} and dst port {self.port}',
+                        '-w', f'{pcap_fullname}']
+            process = subprocess.Popen(command)
+            # Store the PID
+            self.tcpdump_processes[packet_id] = process.pid
+
+            return process.pid
+
+    def stop_tcpdump(self, packet_id):
+        if packet_id in self.tcpdump_processes:
+            tcpdump_pid = self.tcpdump_processes[packet_id]
+            try:
+                os.kill(tcpdump_pid, signal.SIGTERM)
+                # This will clean up the zombie process
+                os.waitpid(tcpdump_pid, 0)
+            except OSError:
+                pass  # Process may have already terminated
+
+            del self.tcpdump_processes[packet_id]
+
     def receive_packet_finish(self, packet_id, packet_number):
         current_time = time.time()
 
         if self.packet_info[packet_id]['first_seen'] is None:
-             self.packet_info[packet_id]['first_seen'] = current_time
+            self.packet_info[packet_id]['first_seen'] = current_time
+
+            # Start tcpdump when the packet_id is first seen
+            proc_id = self.start_tcpdump(packet_id)
+            self.packet_info[packet_id]['tcpdump_process'] = proc_id
 
         self.packet_info[packet_id]['last_seen'] = current_time
 
         packet_number_cnt = self.packet_manager.count_packet(packet_id,
-                                                             packet_number);
+                                                             packet_number)
+
+        if packet_number_cnt == (2 ** 32) - 1:
+            # control packet for starting tx, ignore it.
+            return
+
         if packet_number_cnt == 1:
             # no duplicates
             self.packet_info[packet_id]['count'] += 1
@@ -182,7 +236,6 @@ class UDPServer:
             if len(data) >= 64:
                 packet_id = int.from_bytes(data[:4], byteorder='big')
                 if self.packet_info[packet_id]['dying']:
-                    # this measurement test has expired, ignore it
                     continue
 
                 packet_rate = int.from_bytes(data[8:12], byteorder='big')
@@ -195,12 +248,8 @@ class UDPServer:
                 self.packet_info[packet_id]['direction'] = direction
 
                 if direction > 0:
-                    # the client is in download mode
                     self.send_packets_non_blocking(packet_id)
                     continue
-
-                # the client is in upload mode, a.k.a. the server is receiving
-                # traffic from the client.
 
                 packet_number = int.from_bytes(data[4:8], byteorder='big')
 
@@ -210,7 +259,6 @@ class UDPServer:
         packet_info_copy = self.packet_info.copy()
 
         with open(self.output_file, 'w') as json_file:
-            # Pretty print the JSON
             json.dump(packet_info_copy, json_file, indent=4)
             print(f"Saved packet counts to {self.output_file}")
 
@@ -225,23 +273,25 @@ class UDPServer:
         self.packet_manager.stop()
         # save on disk
         self.save_to_json()
+        # Stop tcpdump processes for all active sessions
+        for packet_id in list(self.tcpdump_processes.keys()):
+            self.stop_tcpdump(packet_id)
 
 # Run the server
 if __name__ == "__main__":
-    # Create the argument parser
     parser = argparse.ArgumentParser(description="UDP Server")
-
-    # Add arguments
     parser.add_argument('-b', '--bind', type=str, default="0.0.0.0",
                         help='Host binding address')
     parser.add_argument('-p', '--port', type=int, default=12345,
                         help='Local port')
+    parser.add_argument('-i', '--interface', type=str,
+                        help='Network interface for tcpdump')
 
-    # Parse the arguments
     args = parser.parse_args()
 
     try:
-        server = UDPServer(host=args.bind, port=args.port)
+        server = UDPServer(host=args.bind, port=args.port,
+                           tcpdump_interface=args.interface)
         server.start()
 
         while True:
