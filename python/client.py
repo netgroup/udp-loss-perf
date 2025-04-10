@@ -99,6 +99,8 @@ class UDPClient:
         # This is a total of 16 bytes, leaving 48 bytes for padding to reach at
         # least 64 bytes
         for i in range(tx_packets_to_send):
+            budget = time.perf_counter() + (1.0 / packet_rate)
+
             # we start a transmission, so we send packets with a specific
             # packet_number to notify the receiver that it needs to prepare for
             # receiving incoming packets.
@@ -110,7 +112,8 @@ class UDPClient:
             self.send_packet(packet_id, packet_num, packet_rate, total_packets,
                              direction)
 
-            common.send_rate_sleep(packet_rate)
+            while time.perf_counter() - budget < 0:
+                pass
 
     def send_packets(self):
         # notify the remote endpoint a tx is starting

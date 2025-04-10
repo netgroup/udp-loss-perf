@@ -153,13 +153,16 @@ class UDPServer:
         direction = self.packet_info[packet_id]['direction']
 
         for i in range(total_packets):
+            budget = time.perf_counter() + (1.0 / packet_rate)
+
             packet_num = i
             self.packet_info[packet_id]['count'] += 1
 
             self.send_packet(remote_address, packet_id, packet_num, packet_rate,
                              total_packets, direction)
 
-            common.send_rate_sleep(packet_rate)
+            while time.perf_counter() - budget < 0:
+                pass
 
     def send_packets_non_blocking(self, packet_id):
         current_time = time.time()
