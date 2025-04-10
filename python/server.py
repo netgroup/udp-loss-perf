@@ -184,7 +184,7 @@ class UDPServer:
         if self.tcpdump_interface:
             srchost, srcport = self.packet_info[packet_id]['remote']
 
-            pcap_name = f"tcpdump_up_{packet_id}.pcap"
+            pcap_name = f"tcpdump_server_up_{packet_id}.pcap"
             pcap_fullname = common.get_pcap_fullpath(pcap_name)
 
             command = ['tcpdump', '-i', self.tcpdump_interface,

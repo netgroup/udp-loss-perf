@@ -11,6 +11,7 @@ import sys
 import traceback
 import argparse
 import datetime
+import subprocess
 import common
 from enum import Enum
 from collections import defaultdict
@@ -27,7 +28,7 @@ class TransmissionState(Enum):
 class UDPClient:
     def __init__(self, host, port=12345, packets_to_send=600,
                  rate=100, direction=0, id_file='data/used_ids.txt',
-                 output_file=None):
+                 interface=None, output_file=None):
         # Each packet ID will map to a dictionary with count, first_seen,
         # last_seen, packet_rate, total_packets, direction
         self.packet_info = defaultdict(lambda: {
@@ -54,6 +55,9 @@ class UDPClient:
 
         self.output_file = (common.get_timestamp_filename("client")
                             if output_file is None else output_file)
+
+        self.interface = interface
+        self.tcpdump_process = None
 
     # Load used packet IDs from a file
     def load_used_ids(self):
@@ -256,11 +260,42 @@ class UDPClient:
         direction = self.direction
         if direction == 0:
             # upload mode (this client sends traffic to the sever)
+            if self.interface:
+                self.start_tcpdump()
+
             self.send_packets()
+
+            if self.interface:
+                self.stop_tcpdump()
+
             return
 
         # download mode (server sends traffic to this clien)
         self.start_download()
+
+    def start_tcpdump(self):
+        pcap_name = f"tcpdump_client_up_{self.packet_id}.pcap"
+        pcap_fullname = common.get_pcap_fullpath(pcap_name)
+        host, port = self.server_address
+
+        # Start tcpdump command
+        command = ['tcpdump', '-i', self.interface,
+                   f'udp and dst host {host} and dst port {port}',
+                   '-w', f'{pcap_fullname}']
+        self.tcpdump_process = subprocess.Popen(command)
+        time.sleep(1)
+
+        print(f"Started tcpdump on interface {self.interface} for UDP traffic to {host}:{port}")
+
+    def stop_tcpdump(self):
+        try:
+            if self.tcpdump_process:
+                time.sleep(10)
+                self.tcpdump_process.terminate()
+                self.tcpdump_process.wait()
+                print("Stopped tcpdump.")
+        except Exception:
+            pass
 
     def save_to_json(self):
         packet_info_copy = self.packet_info.copy()
@@ -280,6 +315,7 @@ class UDPClient:
         self.sock.close()
         # save on disk
         self.save_to_json()
+        self.stop_tcpdump()
 
 def validate_direction(value):
     if value == 'up':
@@ -303,13 +339,16 @@ if __name__ == "__main__":
                         help='Packet rate (default: 1)')
     parser.add_argument('-d', '--direction', type=validate_direction,
                         required=True, help='Direction (up or down)')
+    parser.add_argument('-i', '--interface', type=str,
+                        help='Network interface for tcpdump (for upload)')
 
     # Parse the arguments
     args = parser.parse_args()
 
     try:
         client = UDPClient(host=args.host, packets_to_send=args.npackets,
-                           rate=args.rate, direction=args.direction)
+                           rate=args.rate, direction=args.direction,
+                           interface=args.interface)
         client.start()
     except KeyboardInterrupt:
         client.stop()
