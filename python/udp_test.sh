@@ -3,21 +3,42 @@
 readonly SHUTDOWN_DATE="2025-04-12 00:14:00"
 readonly SHUTDOWN_DATE_SECONDS="$(date -d "$SHUTDOWN_DATE" +%s)"
 
+__run_collect()
+{
+	rsync \
+		-avz \
+		--remove-source-files \
+		--include='*.pcap' --include='*.json'  \
+		--exclude='*' \
+		-e "ssh -i /home/smarts/tmp-key" \
+		--progress /root/data/ \
+		tempuser@139.28.149.89:client
+
+	rsync \
+		-avz \
+		--include='*.txt' \
+		--exclude='*' \
+		-e "ssh -i /home/smarts/tmp-key" \
+		--progress /root/data/ \
+		tempuser@139.28.149.89:client
+}
+
 __run_udp_test()
 {
 	/home/smarts/udp-loss-perf/python/client.py \
-		-z 139.28.149.89 -n 60000 -r 1000 -d up
+		-z 139.28.149.89 -n 60000 -r 2000 -d up --interface enp3s0
 
 	sleep 10
 
-	# tcpdump -i br0 -w /root/data/capture-down-%Y-%m-%d_%H:%M:%S.pcap -G 65 -W 1 &
 	/home/smarts/udp-loss-perf/python/client.py \
-		-z 139.28.149.89 -n 60000 -r 1000 -d down
+		-z 139.28.149.89 -n 120000 -r 4000 -d down
 
 	sleep 10
+
+	__run_collect
 }
 
-__run_collect()
+__run_collect_old()
 {
 	local date_id=$(date '+%Y%m%d%H%M%S')
 	local remote_dir_path="/home/tempuser/data/client/data_${date_id}"
