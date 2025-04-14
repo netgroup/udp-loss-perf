@@ -38,6 +38,28 @@ __run_udp_test()
 	__run_collect
 }
 
+run_udp_progressive_rate_test()
+{
+	local step
+	local rate
+	local irate
+
+	for step in 10 100 1000 10000; do
+		irate=$((step/10))
+
+		for rate in $(seq "${irate}" "${irate}" "$((step - 1))"); do
+			local npackets="$((rate * 60))"
+
+			/home/smarts/udp-loss-perf/python/client.py \
+				-z 139.28.149.89 \
+				-n "${npackets}" -r "${rate}" \
+				-d up --interface enp3s0
+
+			__run_collect
+		done
+	done
+}
+
 __run_collect_old()
 {
 	local date_id=$(date '+%Y%m%d%H%M%S')
@@ -90,9 +112,12 @@ case "$1" in
     run_collect)
         run_collect
         ;;
+    run_rate_test)
+	run_udp_progressive_rate_test
+	;;
     *)
         echo "Error: Invalid parameter '$1'."
-        echo "Valid parameters are: run_test, run_collect."
+        echo "Valid parameters are: run_test, run_collect, run_rate_test"
 	exit 1
         ;;
 esac
