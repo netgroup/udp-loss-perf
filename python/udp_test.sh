@@ -50,6 +50,8 @@ run_udp_progressive_rate_test()
 		for rate in $(seq "${irate}" "${irate}" "$((step - 1))"); do
 			local npackets="$((rate * 60))"
 
+			echo "UDP test: rate ${rate}, npackets ${npackets}"
+
 			/home/smarts/udp-loss-perf/python/client.py \
 				-z 139.28.149.89 \
 				-n "${npackets}" -r "${rate}" \
