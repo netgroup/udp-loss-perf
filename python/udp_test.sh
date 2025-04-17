@@ -1,6 +1,6 @@
 #!/bin/bash
 
-readonly SHUTDOWN_DATE="2025-04-12 00:14:00"
+readonly SHUTDOWN_DATE="2025-04-17 00:14:00"
 readonly SHUTDOWN_DATE_SECONDS="$(date -d "$SHUTDOWN_DATE" +%s)"
 
 __run_collect()
@@ -106,6 +106,13 @@ run_collect()
 	fi
 }
 
+run_cont_rate_test()
+{
+	while ! expired; do
+		run_udp_progressive_rate_test
+	done
+}
+
 # Check the command line parameter
 case "$1" in
     run_test)
@@ -117,9 +124,12 @@ case "$1" in
     run_rate_test)
 	run_udp_progressive_rate_test
 	;;
+    run_cont_rate_test)
+	run_cont_rate_test
+	;;
     *)
         echo "Error: Invalid parameter '$1'."
-        echo "Valid parameters are: run_test, run_collect, run_rate_test"
+        echo "Valid parameters are: run_test, run_collect, run_rate_test, run_cont_rate_test"
 	exit 1
         ;;
 esac
