@@ -42,7 +42,6 @@ class UDPClient:
         })
         self.packets_to_send = packets_to_send
         self.server_address = (host, port)
-        self.msession = common.MSession()
         self.receive_running = False
         self.direction = direction
         self.id_file = id_file
@@ -58,6 +57,8 @@ class UDPClient:
 
         self.interface = interface
         self.tcpdump_process = None
+
+        self.msession = common.MSession(self.packet_id, self.packets_to_send)
 
     # Load used packet IDs from a file
     def load_used_ids(self):
