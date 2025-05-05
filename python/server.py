@@ -28,19 +28,18 @@ class PacketManager:
         threading.Thread(target=self.cleanup_sessions, daemon=True).start()
 
     # Add a new MSession object for the given key
-    def add(self, key):
+    def create_session(self, key, total_packet_num):
         if key not in self.data:
-            self.data[key] = common.MSession()
+            self.data[key] = common.MSession(key, total_packet_num)
 
-    # Count a packet for the given key and number
-    def count_packet(self, key, number):
-        if key in self.data:
-            return self.data[key].count_packet(number)
-        else:
-            # If the key doesn't exist, create a new session and count the
-            # packet
-            self.add(key)
-            return self.data[key].count_packet(number)
+    # Count a packet for the given key and number, considering the total number
+    # of packets
+    def count_packet(self, key, number, total_packet_num):
+        if key not in self.data:
+            # key doesn't exist, create a new session and count the packet
+            self.create_session(key, total_packet_num)
+
+        return self.data[key].count_packet(number)
 
     # Periodically clean up old sessions
     def cleanup_sessions_core(self):
@@ -52,6 +51,10 @@ class PacketManager:
                     keys_to_delete.append(key)
 
             for key in keys_to_delete:
+                # persist the missing packet sequence numbers before destroying
+                # the session to reclaim space.
+                self.data[key].write_missing_packets()
+
                 del self.data[key]
                 # mark the packet info element as dying...
                 self.packet_info[key]['dying'] = True
@@ -208,7 +211,8 @@ class UDPServer:
 
             del self.tcpdump_processes[packet_id]
 
-    def receive_packet_finish(self, packet_id, packet_number):
+    def receive_packet_finish(self, packet_id, packet_number,
+                              total_num_packets):
         current_time = time.time()
 
         if self.packet_info[packet_id]['first_seen'] is None:
@@ -221,7 +225,8 @@ class UDPServer:
         self.packet_info[packet_id]['last_seen'] = current_time
 
         packet_number_cnt = self.packet_manager.count_packet(packet_id,
-                                                             packet_number)
+                                                             packet_number,
+                                                             total_num_packets)
 
         if packet_number_cnt == (2 ** 32) - 1:
             # control packet for starting tx, ignore it.
@@ -256,7 +261,8 @@ class UDPServer:
 
                 packet_number = int.from_bytes(data[4:8], byteorder='big')
 
-                self.receive_packet_finish(packet_id, packet_number)
+                self.receive_packet_finish(packet_id, packet_number,
+                                           total_packets)
 
     def save_to_json(self):
         packet_info_copy = self.packet_info.copy()
